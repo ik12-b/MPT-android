@@ -22,45 +22,74 @@ jobs:
         with:
           java-version: "17"
           distribution: "temurin"
+          cache: gradle
 
-      - name: Setup Android SDK
+      - name: Setup Android SDK (reliable method)
         uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          packages: ''
+        continue-on-error: true
 
-      - name: Accept Android licenses
+      - name: Configure Android SDK path & licenses
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
+          # Use preinstalled SDK on GitHub runner if available
+          if [ -d "$ANDROID_HOME" ]; then
+            echo "ANDROID_HOME=$ANDROID_HOME"
+          elif [ -d "$ANDROID_SDK_ROOT" ]; then
+            export ANDROID_HOME="$ANDROID_SDK_ROOT"
+            echo "ANDROID_HOME=$ANDROID_HOME"
+          elif [ -d "/usr/local/lib/android/sdk" ]; then
+            export ANDROID_HOME="/usr/local/lib/android/sdk"
+            echo "ANDROID_HOME=$ANDROID_HOME"
+          else
+            echo "No Android SDK found, installing cmdline-tools..."
+            mkdir -p $HOME/android-sdk/cmdline-tools
+            curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdtools.zip
+            unzip -q /tmp/cmdtools.zip -d $HOME/android-sdk/cmdline-tools
+            mv $HOME/android-sdk/cmdline-tools/cmdline-tools $HOME/android-sdk/cmdline-tools/latest
+            export ANDROID_HOME=$HOME/android-sdk
+          fi
+
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools" >> $GITHUB_ENV
+
+          # Accept licenses (ignore exit code – often returns 1 even when OK)
+          mkdir -p "$ANDROID_HOME/licenses"
+          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$ANDROID_HOME/licenses/android-sdk-license"
+          echo -e "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          echo -e "d56f5187474654ef1484307f0d04e3f2\n" > "$ANDROID_HOME/licenses/android-googletv-license" || true
+          echo -e "601085b94cd77f0b54ff86406957099ebe79c4d6\n" > "$ANDROID_HOME/licenses/android-googletv-license" || true
+          echo -e "33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n" > "$ANDROID_HOME/licenses/google-gdk-license" || true
+          echo -e "e9acab5b5fbb460a045598a5d1236fd5\n" > "$ANDROID_HOME/licenses/mips-android-sys-img-license" || true
+          echo -e "859f317696f67ef3d7f30a50a57907e5\n" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license" || true
+
+          yes 2>/dev/null | sdkmanager --licenses >/tmp/sdk-licenses.log 2>&1 || true
+          cat /tmp/sdk-licenses.log | tail -5 || true
+
+          # Install required packages
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" >/tmp/sdk-install.log 2>&1 || true
+          echo "=== sdk install log (tail) ==="
+          tail -20 /tmp/sdk-install.log || true
+          echo "=== platforms ==="
+          ls "$ANDROID_HOME/platforms" 2>/dev/null || echo "no platforms dir yet"
+          ls "$ANDROID_HOME/build-tools" 2>/dev/null || echo "no build-tools dir yet"
 
       - name: Create local.properties
         run: |
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "sdk.dir content:" && cat local.properties
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+          cat local.properties
 
       - name: Make gradlew executable
         run: |
-          if [ -f ./gradlew ]; then
-            chmod +x ./gradlew
-          else
-            echo "gradlew missing, generating wrapper..."
-            gradle wrapper --gradle-version 8.9
-            chmod +x ./gradlew
-          fi
-          ls -la gradlew gradle/wrapper/
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          chmod +x ./gradlew || true
+          ls -la gradlew gradle/wrapper/ || true
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace --no-daemon
         env:
-          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false"
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false -Dkotlin.daemon.jvmargs=-Xmx2g"
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
@@ -71,6 +100,7 @@ jobs:
           retention-days: 14
 
       - name: Show APK info
+        if: success()
         run: |
           echo "=== APK files ==="
           find app/build/outputs -name "*.apk" -type f -exec ls -lh {} \;
